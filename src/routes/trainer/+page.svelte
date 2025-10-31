@@ -1,77 +1,80 @@
-<script context="module">
-    export const ssr = false; // keep SSR off for speech + window usage
-</script>
-
 <script>
     import { onMount, onDestroy } from "svelte";
 
+    // === State ===
     let words = [];
-    let existingHardWords = [];
-    let existingNormalWords = [];
-    let availableWords = [];
+    let normalWords = [];
+    let hardWords = [];
+    let unfilteredWords = [];
+
+    // Only new words added this session
+    let newNormalWords = [];
+    let newHardWords = [];
 
     let currentWord = "";
     let input = "";
     let previousWord = null;
-    let previousStatus = null; // 'correct' | 'wrong'
-    let hardWords = [];
-    let normalWords = [];
+    let previousStatus = null;
 
-    let showCopied = false;
-    let copyType = ""; // show which list we copied
+    // === Load JSON files ===
+    async function loadWordLists() {
+        const [wordsRes, normalRes, hardRes] = await Promise.all([
+            fetch("/words.json"),
+            fetch("/normalWords.json"),
+            fetch("/hardWords.json"),
+        ]);
 
-    // Load all lists from /static/
-    async function loadData() {
-        try {
-            const [wordsRes, hardRes, normalRes] = await Promise.all([
-                fetch("/words.json"),
-                fetch("/hardWords.json"),
-                fetch("/normalWords.json"),
-            ]);
+        words = await wordsRes.json();
+        normalWords = await normalRes.json();
+        hardWords = await hardRes.json();
 
-            words = await wordsRes.json();
-            existingHardWords = await hardRes.json();
-            existingNormalWords = await normalRes.json();
-
-            // filter out words already categorized
-            availableWords = words.filter(
-                (w) =>
-                    !existingHardWords.includes(w) &&
-                    !existingNormalWords.includes(w),
-            );
-
-            newWord();
-        } catch (err) {
-            console.error("Failed to load word lists:", err);
-        }
+        filterWords();
+        newWord();
     }
 
+    // === Filter out completed words ===
+    function filterWords() {
+        unfilteredWords = words.filter(
+            (w) => !normalWords.includes(w) && !hardWords.includes(w),
+        );
+    }
+
+    // === Pick a new random word ===
     function newWord() {
-        if (availableWords.length === 0) {
+        if (unfilteredWords.length === 0) {
             currentWord = "";
-            alert("No more words left!");
             return;
         }
-
-        const idx = Math.floor(Math.random() * availableWords.length);
-        currentWord = availableWords[idx];
-        speak(currentWord);
+        const idx = Math.floor(Math.random() * unfilteredWords.length);
+        currentWord = unfilteredWords[idx];
         input = "";
+        speak(currentWord);
     }
 
+    // === Speak the word ===
     function speak(word) {
         const utter = new SpeechSynthesisUtterance(word);
-        utter.rate = 0.8;
+        utter.rate = 1.1;
         speechSynthesis.speak(utter);
     }
 
+    // === Confirm typed word ===
     function confirmWord() {
         if (!currentWord) return;
 
         if (input.trim().toLowerCase() === currentWord.toLowerCase()) {
+            if (
+                !normalWords.includes(currentWord) &&
+                !hardWords.includes(currentWord)
+            ) {
+                normalWords = [...normalWords, currentWord];
+                newNormalWords = [...newNormalWords, currentWord];
+                saveList("normalWords.json", normalWords);
+            }
+
             previousWord = currentWord;
             previousStatus = "correct";
-            availableWords = availableWords.filter((w) => w !== currentWord);
+            unfilteredWords = unfilteredWords.filter((w) => w !== currentWord);
             newWord();
         } else {
             previousWord = currentWord;
@@ -81,43 +84,43 @@
         }
     }
 
+    // === Restart current word ===
     function restartWord() {
         if (currentWord) speak(currentWord);
     }
 
-    // Add to hard or normal words
-    function addToList(list, word, existingList) {
-        if (!word || list.includes(word) || existingList.includes(word)) return;
-        list = [...list, word]; // clone to trigger reactivity
-        return list;
-    }
+    // === Mark word as hard ===
+    function markHard(word) {
+        if (!word) return;
+        normalWords = normalWords.filter((w) => w !== word);
+        newNormalWords = newNormalWords.filter((w) => w !== word);
 
-    function handleKeydown(e) {
-        if (e.code === "Space" && e.ctrlKey) {
-            // Ctrl + Space → add to hard
-            e.preventDefault();
-            if (previousStatus === "correct" && input.trim() === "") {
-                hardWords = addToList(
-                    hardWords,
-                    previousWord,
-                    existingHardWords,
-                );
-                console.log("Added to hard words:", previousWord);
-                return;
-            }
+        if (!hardWords.includes(word)) {
+            hardWords = [...hardWords, word];
+            newHardWords = [...newHardWords, word];
         }
 
-        if (e.code === "Space" && !e.ctrlKey) {
+        saveList("normalWords.json", normalWords);
+        saveList("hardWords.json", hardWords);
+        filterWords();
+    }
+
+    function saveList(name, data) {
+        localStorage.setItem(name, JSON.stringify(data));
+    }
+
+    async function copyToClipboard(list) {
+        const text = list.map((w) => `"${w}",`).join("\n");
+        await navigator.clipboard.writeText(text);
+    }
+
+    // === Keyboard events ===
+    function handleKeydown(e) {
+        if (e.code === "Space") {
             e.preventDefault();
 
-            // Normal space → add to normal words
             if (previousStatus === "correct" && input.trim() === "") {
-                normalWords = addToList(
-                    normalWords,
-                    previousWord,
-                    existingNormalWords,
-                );
-                console.log("Added to normal words:", previousWord);
+                markHard(previousWord);
                 return;
             }
 
@@ -130,200 +133,191 @@
         }
     }
 
-    // Copy formatted lists
-    function copyList(type) {
-        let list = type === "hard" ? hardWords : normalWords;
-        if (!list || list.length === 0) return;
-        const formatted = list.map((w) => `"${w}",`).join("\n");
-        navigator.clipboard.writeText(formatted);
-        copyType = type;
-        showCopied = true;
-        setTimeout(() => (showCopied = false), 1500);
-    }
-
-    onMount(() => {
-        loadData();
+    onMount(async () => {
+        await loadWordLists();
         window.addEventListener("keydown", handleKeydown);
-    });
-
-    onDestroy(() => {
-        window.removeEventListener("keydown", handleKeydown);
     });
 </script>
 
 <main>
-    {#if previousWord}
-        <div class="previous {previousStatus}">
-            {previousWord}
-        </div>
-    {/if}
+    <div class="container">
+        <h1>trainer</h1>
+        <p class="counter">{unfilteredWords.length} left</p>
 
-    <input bind:value={input} placeholder="Type the word..." autofocus />
+        {#if previousWord}
+            <div class="previous {previousStatus}">
+                {previousWord}
+            </div>
+        {/if}
 
-    <div class="lists">
-        <div class="listbox">
-            <h2>Normal Words</h2>
-            {#if normalWords.length > 0}
-                <ul>
-                    {#each normalWords as word}
-                        <li>{word}</li>
-                    {/each}
-                </ul>
-            {:else}
-                <p class="empty">None yet</p>
-            {/if}
-            <button
-                on:click={() => copyList("normal")}
-                disabled={normalWords.length === 0}
-            >
-                Copy Normal
-            </button>
+        <!-- input stays centered / fixed -->
+        <div class="input-area">
+            <input bind:value={input} placeholder="type here..." autofocus />
         </div>
 
-        <div class="listbox">
-            <h2>Hard Words</h2>
-            {#if hardWords.length > 0}
-                <ul>
-                    {#each hardWords as word}
-                        <li>{word}</li>
-                    {/each}
-                </ul>
-            {:else}
-                <p class="empty">None yet</p>
-            {/if}
-            <button
-                on:click={() => copyList("hard")}
-                disabled={hardWords.length === 0}
-            >
-                Copy Hard
-            </button>
+        <!-- scrollable infinite lists -->
+        <div class="lists">
+            <div class="list">
+                <div class="list-header">
+                    <span>normal ({newNormalWords.length})</span>
+                    {#if newNormalWords.length > 0}
+                        <button on:click={() => copyToClipboard(newNormalWords)}
+                            >copy</button
+                        >
+                    {/if}
+                </div>
+                {#if newNormalWords.length > 0}
+                    <pre>{newNormalWords.map((w) => `"${w}",`).join("\n")}</pre>
+                {/if}
+            </div>
+
+            <div class="list">
+                <div class="list-header">
+                    <span>hard ({newHardWords.length})</span>
+                    {#if newHardWords.length > 0}
+                        <button on:click={() => copyToClipboard(newHardWords)}
+                            >copy</button
+                        >
+                    {/if}
+                </div>
+                {#if newHardWords.length > 0}
+                    <pre>{newHardWords.map((w) => `"${w}",`).join("\n")}</pre>
+                {/if}
+            </div>
         </div>
-    </div>
-
-    {#if showCopied}
-        <div class="copied">Copied {copyType} words!</div>
-    {/if}
-
-    <div class="instructions">
-        Space: add to normal | Ctrl + Space: add to hard | Enter: repeat
     </div>
 </main>
 
 <style>
+    :root {
+        --bg: #222;
+        --text: #ccc;
+        --accent: #999;
+        --green: #81c784;
+        --red: #e57373;
+    }
+
     main {
+        position: relative;
+        display: flex;
+        justify-content: center;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Fira Code", monospace;
+        min-height: 100vh;
+        overflow: hidden;
+    }
+
+    .container {
+        position: relative;
+        width: 400px;
+        text-align: center;
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
-        height: 100vh;
-        background: #1b1b1b;
-        color: #eee;
-        font-family: "Fira Code", monospace;
+    }
+
+    h1 {
+        margin: 0;
+        font-weight: 400;
+        color: var(--accent);
+        opacity: 0.8;
+        letter-spacing: 1px;
+        padding-top: 2rem;
+    }
+
+    .counter {
+        font-size: 0.85rem;
+        margin-bottom: 0.5rem;
+        color: #777;
     }
 
     .previous {
-        font-size: 1.5rem;
+        font-size: 1.2rem;
         margin-bottom: 1rem;
     }
 
     .previous.correct {
-        color: #00c853;
+        color: var(--green);
     }
 
     .previous.wrong {
-        color: #ff5252;
+        color: var(--red);
+    }
+
+    /* Centered input box */
+    .input-area {
+        position: fixed;
+        top: 16.5%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 300px;
+        z-index: 5;
     }
 
     input {
-        font-size: 2rem;
+        width: 100%;
+        font-size: 1.4rem;
         text-align: center;
         background: transparent;
         border: none;
-        border-bottom: 2px solid #555;
-        color: white;
+        border-bottom: 1px solid #444;
+        color: var(--text);
         outline: none;
-        width: 300px;
+        transition: border 0.2s;
     }
 
     input:focus {
-        border-bottom: 2px solid #9acd32;
+        border-bottom: 1px solid var(--accent);
     }
 
-    .instructions {
-        position: absolute;
-        bottom: 1rem;
-        font-size: 0.9rem;
-        color: #999;
-    }
-
+    /* Scrollable lists section */
     .lists {
         position: absolute;
-        top: 1rem;
-        right: 1rem;
+        top: 20%;
+        left: 55%;
+        transform: translateX(-50%);
+        width: 90%;
+        max-width: 500px;
         display: flex;
-        flex-direction: column;
-        gap: 0.75rem;
-    }
-
-    .listbox {
-        background: #222;
-        border: 1px solid #333;
-        padding: 0.75rem 1rem;
-        border-radius: 6px;
-        max-height: 220px;
+        gap: 1rem;
+        justify-content: space-between;
         overflow-y: auto;
-        font-size: 0.9rem;
-        width: 220px;
+        padding-bottom: 2rem;
     }
 
-    .listbox h2 {
-        margin: 0 0 0.5rem 0;
-        font-size: 1rem;
-        color: #9acd32;
+    .list {
+        flex: 1;
+        text-align: left;
     }
 
-    .listbox ul {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-    }
-
-    .listbox li {
-        margin: 0.2rem 0;
+    .list-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.8rem;
+        color: var(--accent);
+        margin-bottom: 0.4rem;
     }
 
     button {
-        background: #333;
-        color: #9acd32;
-        border: 1px solid #555;
-        padding: 0.4rem 0.8rem;
-        border-radius: 4px;
-        font-family: inherit;
-        font-size: 0.8rem;
+        background: none;
+        color: var(--accent);
+        border: none;
+        font-size: 0.7rem;
         cursor: pointer;
-        transition: all 0.2s ease;
-        width: 100%;
-        margin-top: 0.5rem;
+        opacity: 0.6;
     }
 
     button:hover {
-        background: #444;
+        opacity: 1;
     }
 
-    button:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
-
-    .copied {
-        position: absolute;
-        bottom: 3rem;
-        right: 1rem;
-        background: #2e7d32;
-        color: white;
-        padding: 0.4rem 0.8rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
-        opacity: 0.9;
+    pre {
+        margin: 0;
+        font-size: 0.75rem;
+        color: #888;
+        white-space: pre-wrap;
+        word-break: break-all;
     }
 </style>
